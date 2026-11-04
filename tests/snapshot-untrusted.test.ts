@@ -248,6 +248,12 @@ describe('读原件:坏结构', () => {
     expect(() => read('["\\"",' + '['.repeat(70) + ']'.repeat(70) + ']')).toThrow('层数太多');
   });
 
+  it('结构的上限可以由调用方给(本机存取的世界比传上服务器的大)', () => {
+    const b = packValue({ a: 'x'.repeat(1000) });
+    expect(() => unpackValue(b, 100)).toThrow('结构太大');
+    expect(unpackValue(b, 2000)).toEqual({ a: 'x'.repeat(1000) });
+  });
+
   it('结构太大:不用解析就拒绝', () => {
     const b = new Uint8Array(12 + 64e6 + 1);
     b.set(new TextEncoder().encode('CIVSNAP1'), 0);
@@ -356,8 +362,11 @@ describe('读一块:解压的上限', () => {
     expect(partLimit('eras')).toBe(80e6);
     expect(partLimit('civ')).toBe(160e6);
     expect(partLimit('chronicle')).toBe(64e6);
+    expect(partLimit('flags')).toBe(16e6);
+    expect(partLimit('author')).toBe(64e6);
+    expect(partLimit('thumb')).toBe(2e6);
     // 认不出的块名(包括和对象自带的属性同名的)给保守的上限
-    for (const name of ['thumb', 'ext.magic', 'constructor', '__proto__', '']) expect(partLimit(name), name).toBe(16e6);
+    for (const name of ['ext.magic', 'constructor', '__proto__', '']) expect(partLimit(name), name).toBe(16e6);
   });
 
   it('说好的字节数超上限:碰都不碰解压', async () => {

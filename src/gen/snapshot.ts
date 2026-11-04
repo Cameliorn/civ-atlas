@@ -160,6 +160,12 @@ const PART_LIMITS: ReadonlyMap<string, number> = new Map([
   ['eras', 80 * MB],
   ['civ', 160 * MB],
   ['chronicle', 64 * MB],
+  // 各国历代的旗:实测最大(20 万地块、6 万年)不到 1 MB
+  ['flags', 16 * MB],
+  // AI 写的正文:量不出最大值(看作者写多少),按编年史的量级给足,别让写得多的世界打不开
+  ['author', 64 * MB],
+  // 封面:480 × 240 的 JPEG 几十 KB
+  ['thumb', 2 * MB],
 ]);
 /**
  * 认不出的块名给 16 MB。认不出的块本来就只原样留着、不用解开;真要读的只会是以后新加的块,那时在上面的表里按实测写明上限。
@@ -168,6 +174,14 @@ const PART_LIMITS: ReadonlyMap<string, number> = new Map([
 const UNKNOWN_PART_LIMIT = 16 * MB;
 /** 一块里结构(JSON)最多多大:实测最大 45 MB */
 const MAX_HEAD_BYTES = 64 * MB;
+/**
+ * 本机存取的世界文件用这两个数,代替上面的表和 MAX_HEAD_BYTES。本机不限世界多大,而上面的表是按默认陆地比例量的,
+ * 陆地多的世界州也多,历史那一块会超过(20 万地块、6 万年、5 件地形大事、陆地 60% 的世界实测 203 MB)。
+ * 这两个数只防撑爆内存:一块最多解到 1 GB,和本机的文件大小上限(zipStore.ts 的 ZIP_LOCAL_MAX_BYTES)一个数;
+ * 结构再大 JavaScript 的字符串也放不下(最长约 5.4 亿个字符)
+ */
+export const LOCAL_PART_MAX_BYTES = 1e9;
+export const LOCAL_HEAD_MAX_BYTES = 512 * MB;
 /** 结构最多几层:真实世界不到 20 层(单测盯着)。限了层数,读的时候递归才不会把栈撑爆 */
 const MAX_DEPTH = 64;
 /**
@@ -336,7 +350,7 @@ export function packValue(root: unknown): Uint8Array {
  * 结构的字节最深几层,超上限就拒绝(还没开始 JSON.parse):字符串里的括号不算。
  * 不是合格 JSON 的,这里算出来的层数不作数,接着 JSON.parse 会拒绝
  */
-function checkDepth(head: Uint8Array): void {
+export function checkDepth(head: Uint8Array): void {
   let depth = 0;
   let inString = false;
   for (let i = 0; i < head.length; i++) {
@@ -351,13 +365,13 @@ function checkDepth(head: Uint8Array): void {
   }
 }
 
-/** packValue 打的字节读回成值(数组各自复制一份,不和这些字节共用);格式不对、超上限抛错。字节当别人写的看(见文件头) */
-export function unpackValue(bytes: Uint8Array): unknown {
+/** packValue 打的字节读回成值(数组各自复制一份,不和这些字节共用);格式不对、超上限抛错。字节当别人写的看(见文件头)。maxHead = 结构最多多大 */
+export function unpackValue(bytes: Uint8Array, maxHead: number = MAX_HEAD_BYTES): unknown {
   if (!littleEndian()) throw new Error('大端的机器不支持');
   if (bytes.length < MAGIC.length + 4) throw new Error('原件不完整');
   for (let i = 0; i < MAGIC.length; i++) if (bytes[i] !== MAGIC.charCodeAt(i)) throw new Error('不是原件');
   const len = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(MAGIC.length, true);
-  if (len > MAX_HEAD_BYTES) throw new Error('原件的结构太大');
+  if (len > maxHead) throw new Error('原件的结构太大');
   if (MAGIC.length + 4 + len > bytes.length) throw new Error('原件不完整');
   const head = bytes.subarray(MAGIC.length + 4, MAGIC.length + 4 + len);
   checkDepth(head);
@@ -483,16 +497,24 @@ export async function makePart(name: string, value: unknown): Promise<SnapshotPa
  * 说好的字节数先看:超这块的上限不开始解;解的时候比说好的多就停,所以解多少由 min(上限, 说好的) 管着,压缩炸弹撑不开内存
  */
 export async function readPart(part: SnapshotPart): Promise<unknown> {
-  const { name, bytes, zip, data } = part;
-  if (Object.prototype.toString.call(data) !== '[object ArrayBuffer]') throw new Error('原件的字节不对');
-  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > partLimit(name)) throw new Error('原件这一块超过上限');
-  let raw = new Uint8Array(data);
+  if (Object.prototype.toString.call(part.data) !== '[object ArrayBuffer]') throw new Error('原件的字节不对');
+  return unpackValue(await partBytes(part, new Uint8Array(part.data)));
+}
+
+/**
+ * 一块解压后的字节:解不开、超上限、校验对不上抛错(规矩同 readPart)。data 是这一块压缩后的字节;没压缩的直接交回 data 本身。
+ * 不是 packValue 打的块(封面)也从这里取。limit = 这一块最多多大
+ */
+export async function partBytes(part: Pick<SnapshotPart, 'name' | 'bytes' | 'sum' | 'zip'>, data: Uint8Array, limit: number = partLimit(part.name)): Promise<Uint8Array> {
+  const { bytes, zip } = part;
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > limit) throw new Error('原件这一块超过上限');
+  let raw = data;
   if (zip === 'gzip') {
     if (!canZip()) throw new Error('这个浏览器太旧,解不开原件');
     raw = await inflate(raw, bytes);
   } else if (zip !== 'none') throw new Error('原件的压缩方式认不出');
   if (raw.length !== bytes || (await sha256(raw)) !== part.sum) throw new Error('原件对不上校验');
-  return unpackValue(raw);
+  return raw;
 }
 
 /** 原件里叫 name 的那一块;没有 = undefined */
