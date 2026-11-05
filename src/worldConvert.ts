@@ -19,7 +19,7 @@ import { sketchGrid } from './gen/sketch';
 import { SNAPSHOT_FORMAT, makePart, partOf, readLocalPart, recipeKey, recipeOfSave, type Recipe, type SnapshotPart } from './gen/snapshot';
 import { generateWorld, type World } from './gen/world';
 import { openStoredParts, readTrustedParts, type PackedPart, type WorldEras } from './gen/worldFile';
-import type { AuthorContent, WorldMade } from './gen/worldFormat';
+import type { WorldMade } from './gen/worldFormat';
 import { validateCiv, validateEras, validateWorld } from './gen/worldValidate';
 import { indexedDbResults, type ResultBackend } from './resultDb';
 import { eraWorlds, keyOf, mapValue, namesOpt, playOpt, setupOpt, upOpt, worldChronicle, worldFlags, yearsOpt } from './worldRun';
@@ -30,7 +30,6 @@ interface JobBase {
   /** 世界的存档 */
   save: SaveFile;
   /** 作者内容、封面(和存档一样由主线程给;不给 = 没有) */
-  author?: AuthorContent | null;
   thumb?: Uint8Array;
 }
 
@@ -66,7 +65,7 @@ async function fromOriginal(job: Extract<ConvertJob, { kind: 'original' }>, resu
   const parts = [mapPart, ...(erasPart && eras?.eras.length ? [erasPart] : []), civPart, ...(await storyParts(world, civ, job.save))];
   // 真实的版本:存的时候记下的那一版;提交号当时没记,不编
   const made: WorldMade = { app: rec.app, generator: rec.generator, commit: '', at: Number.isNaN(Date.parse(rec.at)) ? job.save.savedAt : rec.at };
-  return commitWorld({ id: job.id, recipe: job.save, recipeKey: s.recipe, parts, schemas: ORIGINAL_SCHEMAS, made, readers: { ...FIRST_READERS }, author: job.author, thumb: job.thumb, source: job.source });
+  return commitWorld({ id: job.id, recipe: job.save, recipeKey: s.recipe, parts, schemas: ORIGINAL_SCHEMAS, made, readers: { ...FIRST_READERS }, thumb: job.thumb, source: job.source });
 }
 
 /** 地图留着的世界用的地图、各段世界(存下来的,不重新长) */
@@ -125,7 +124,7 @@ async function fromRecipe(job: Extract<ConvertJob, { kind: 'recompute' }>): Prom
     ...(await storyParts(world, civ, job.save)),
   ];
   const made: WorldMade = { app: job.app, generator: GENERATOR_VERSION, commit: job.commit, at: new Date().toISOString() };
-  return commitWorld({ id: job.id, recipe: job.save, recipeKey: await recipeKey(r), parts, made, readers: { ...READER_VERSIONS }, author: job.author, thumb: job.thumb, source: 'migrated' });
+  return commitWorld({ id: job.id, recipe: job.save, recipeKey: await recipeKey(r), parts, made, readers: { ...READER_VERSIONS }, thumb: job.thumb, source: 'migrated' });
 }
 
 const asSnapshotPart = (p: PackedPart): SnapshotPart => ({ name: p.info.name, bytes: p.info.bytes, sum: p.info.sum, zip: p.info.zip as SnapshotPart['zip'], data: p.data instanceof Uint8Array ? (p.data.slice().buffer as ArrayBuffer) : p.data });
@@ -206,7 +205,6 @@ async function fromKeptMap(job: Extract<ConvertJob, { kind: 'keptMap' }>): Promi
     made,
     // 地形按地图长出来时那一版读,放大的细部才不变;历史是现在算的,查询用现在的
     readers: { terrain: src.manifest.readers.terrain, query: READER_VERSIONS.query },
-    author: job.author,
     thumb: job.thumb,
   });
 }
