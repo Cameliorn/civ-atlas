@@ -8,7 +8,8 @@
  *
  * 文件交到手上:电脑上直接下载。手机、平板上打包是后台做的,做完浏览器可能不让自动下载,所以提示条上点一下「存到手机」:
  * 能分享文件的(iPhone)出系统的分享菜单,别的(安卓 Chrome 只肯分享图片、视频这类文件)直接下载。
- * 没有内容可存的世界(没建完的、更旧的版本又没有原件的、没存进「我的世界」的)存成 .json(只带配方),旧的文件照旧能打开。
+ * 没有内容可存的世界(没建完的、更旧的版本又没有原件的)存成 .json(只带配方),旧的文件照旧能打开。
+ * 没存进「我的世界」的、存储满了存不进去的:页面里有,照样存下整个世界。
  * 打不开时的字和打开旧世界用同一套(openTrouble.ts)。
  */
 import { editCount, parseSave, saveFileName, saveText, type SaveFile } from '../gen/savefile';
@@ -17,7 +18,9 @@ import { isCoarse, isNarrow } from './device';
 import { openWorldById } from './newCivAction';
 import { FILE_TROUBLE, newerNotice } from './openTrouble';
 import { holdFileTrouble, holdOpenNote, type OpenNote } from './openNote';
-import { MAX_WORLDS, currentSave, currentUnsaved, currentWorld, importSave, loadWorld, markFromFile, notify, persistent, savesChanged, storedCount } from './saveStore';
+import { MAX_WORLDS, currentSave, currentUnsaved, currentWorld, importSave, isStored, listWorlds, loadWorld, markFromFile, notify, persistent, savesChanged, storedCount } from './saveStore';
+import { aboutSize, sizeText } from './sizeWords';
+import { inSmallWindow, noteFileSaved, saveMark } from './spaceFacts';
 import { clearToast, getToast, peekToast, showToast, updateToast, type ToastAction, type ToastInput } from './toastStore';
 import {
   checkTimeout,
@@ -32,10 +35,13 @@ import {
   type KeepTrouble,
   type OpenedWorldFiles,
   type PickedFile,
+  type SaveTrouble,
   type SavedBackup,
   type WorldFileProgress,
 } from './worldFiles';
 import { saveContentAgain } from './worldStore';
+
+export { aboutSize, sizeText };
 
 const TOAST = 'world-file';
 /** 存文件要等多久才出提示条(毫秒) */
@@ -51,27 +57,6 @@ const SEND_HINT = '发给别人时，让对方到这个网站点「打开存档�
 const RECIPE_ONLY = '只带上了配方，打开时要重新算';
 const RECIPE_SAVED = '已存成配方文件';
 const RECIPE_MORE = '只有几 KB。对方打开时重新长一遍，可能和你看到的不一样';
-
-// ---------------------------------------------------------------------------
-// 大小的写法
-
-/** 存好了的大小:4.9 MB、140 MB、2.3 GB */
-export function sizeText(bytes: number): string {
-  if (bytes < 1e6) return `${Math.max(1, Math.round(bytes / 1e3))} KB`;
-  const mb = bytes / 1e6;
-  if (mb < 10) return `${mb.toFixed(1)} MB`;
-  if (mb < 1000) return `${Math.round(mb)} MB`;
-  return `${(mb / 1000).toFixed(1)} GB`;
-}
-
-/** 还没存时的大小:约 5 MB、约 140 MB、不到 1 MB */
-export function aboutSize(bytes: number): string {
-  const mb = bytes / 1e6;
-  if (mb < 1) return '不到 1 MB';
-  if (mb < 100) return `约 ${Math.round(mb)} MB`;
-  if (mb < 1000) return `约 ${Math.round(mb / 10) * 10} MB`;
-  return `约 ${(mb / 1000).toFixed(1)} GB`;
-}
 
 /** 存档菜单、卡片菜单上写的大小(还没有内容的 = null) */
 export async function fileSizeNote(id: string): Promise<string | null> {
@@ -167,20 +152,32 @@ async function saveOnPhone(file: Blob, name: string): Promise<'shared' | 'cancel
   return 'downloaded';
 }
 
-/** 微信、QQ 里的小窗口存不了文件:说一声,不白打包(没有真机验过,认的是这两个浏览器标记) */
+/** 微信、QQ 里的小窗口存不了文件:说一声,不白打包 */
 function noFilesHere(): boolean {
-  if (!/MicroMessenger|\bQQ\/\d/i.test(navigator.userAgent)) return false;
+  if (!inSmallWindow()) return false;
   say({ kind: 'warn', text: '这里存不了文件', more: ['微信、QQ 里的小窗口不让存'] });
   return true;
 }
 
-/** tail:小字后半句;warn:提示条不自己收;done:交到手上以后说这一句 */
-function handOver(file: Blob, name: string, o: { tail?: string; warn?: boolean; done?: ToastInput } = {}) {
+/** 开始存时就取:存的这一会儿又改了,算之后改过 */
+function marksOf(ids: readonly string[]): { id: string; mark: string }[] {
+  return ids.flatMap((id) => {
+    const save = loadWorld(id)?.save ?? (currentWorld()?.id === id ? currentSave() : null);
+    return save ? [{ id, mark: saveMark(save) }] : [];
+  });
+}
+
+type Marks = ReturnType<typeof marksOf>;
+const noteGiven = (marks: Marks) => noteFileSaved(marks, (id) => isStored(id) || currentWorld()?.id === id);
+
+/** tail:小字后半句;warn:提示条不自己收;done:交到手上以后说这一句;marks:这个文件里的世界 */
+function handOver(file: Blob, name: string, o: { tail?: string; warn?: boolean; done?: ToastInput; marks?: Marks } = {}) {
   const size = sizeText(file.size);
   const tail = o.tail ?? SEND_HINT;
   const kind = o.warn ? 'warn' : 'ok';
   if (!tapToSave()) {
     download(file, name);
+    noteGiven(o.marks ?? []);
     say(o.done ?? { kind, text: '已存成文件', more: [`${name}，${size}。${tail}`] });
     return;
   }
@@ -197,6 +194,7 @@ function handOver(file: Blob, name: string, o: { tail?: string; warn?: boolean; 
       onClick: () =>
         void saveOnPhone(file, name).then((r) => {
           if (r === 'cancelled') return;
+          noteGiven(o.marks ?? []);
           if (o.done) say(o.done);
           else if (r === 'shared') clearToast(TOAST);
           else say({ kind, text: '已存成文件', more: [`在手机的「下载」里，${size}。${tail}`] });
@@ -210,6 +208,12 @@ function noteSaved(name: string, bytes: number, save: SaveFile | undefined) {
   (window as unknown as { __wfSave?: { name: string; bytes: number; count: number } }).__wfSave = { name, bytes, count: save ? editCount(save.edits) : 0 };
 }
 
+function behindTail(kind: SaveTrouble | undefined): string {
+  if (kind === 'memory') return '内存不够，刚才的改动没带上。关掉别的页面再存一次';
+  if (kind === 'full') return '里面是上次存下的样子，刚才的改动没带上';
+  return '刚才的改动还没算完，没带上';
+}
+
 function recipeBlob(save: SaveFile) {
   const name = saveFileName(save);
   const file = new Blob([saveText(save)], { type: 'application/json;charset=utf-8' });
@@ -218,14 +222,14 @@ function recipeBlob(save: SaveFile) {
 }
 
 /** 存成 .json(只带配方)。tail 不给 = 说只带上了配方 */
-export function saveRecipeFile(save: SaveFile, tail: string = RECIPE_ONLY) {
+export function saveRecipeFile(save: SaveFile, tail: string = RECIPE_ONLY, marks?: Marks) {
   const { name, file } = recipeBlob(save);
-  handOver(file, name, { tail, warn: true });
+  handOver(file, name, { tail, warn: true, ...(marks ? { marks } : {}) });
 }
 
-function saveOnlyRecipe(save: SaveFile) {
+function saveOnlyRecipe(save: SaveFile, marks?: Marks) {
   const { name, file } = recipeBlob(save);
-  handOver(file, name, { tail: RECIPE_MORE, done: { kind: 'ok', text: RECIPE_SAVED, more: [RECIPE_MORE] } });
+  handOver(file, name, { tail: RECIPE_MORE, done: { kind: 'ok', text: RECIPE_SAVED, more: [RECIPE_MORE] }, ...(marks ? { marks } : {}) });
 }
 
 export function saveWorldRecipe(id: string) {
@@ -273,6 +277,7 @@ export function saveWorldToFile(id: string): Promise<void> {
 async function saveOne(id: string): Promise<void> {
   if (noFilesHere() || !begin()) return;
   const title = (loadWorld(id)?.save.title ?? currentWorld()?.title) || '这个世界';
+  const marks = marksOf([id]);
   let cancelled = false;
   let share: number | undefined;
   const bar = progressBar(SAVE_WAIT_MS, () => {
@@ -306,15 +311,16 @@ async function saveOne(id: string): Promise<void> {
     // 没有内容可存、存不进仓库:配方带得走,世界不会丢
     const save = recipeOf(id);
     if (!save) return notify({ kind: 'error', text: '打不开这个存档', more: ['可能已在别的页面里删掉了'] });
-    return r.kind === 'draft' ? saveRecipeFile(save) : saveOnlyRecipe(save);
+    return r.kind === 'draft' ? saveRecipeFile(save, RECIPE_ONLY, marks) : saveOnlyRecipe(save, marks);
   }
-  // 刚才的改动写不进浏览器(存储满了):页面里的改动只有配方带得走
+  // 刚才的改动写不进浏览器(存储满了),页面里又打不成文件:页面里的改动只有配方带得走
   if (r.stale && currentWorld()?.id === id && currentUnsaved()) {
     const save = currentSave();
-    if (save) return saveRecipeFile(save);
+    if (save) return saveRecipeFile(save, RECIPE_ONLY, marks);
   }
   noteSaved(r.name, r.file.size, recipeOf(id) ?? undefined);
-  handOver(r.file, r.name, r.stale ? { tail: '刚才的改动还没算完，没带上', warn: true } : {});
+  // 落后的文件没带上现在的样子,不算存过
+  handOver(r.file, r.name, r.stale ? { tail: behindTail(r.behind), warn: true } : { marks });
 }
 
 /** 正开着的世界存成文件(存档菜单、存储满了时提示条上的「存成文件」) */
@@ -330,13 +336,14 @@ export function saveCurrentToFile(): Promise<void> {
 function allWarnings(r: SavedBackup): string[] {
   const more: string[] = [];
   if (r.recipeOnly.length) more.push(`其中 ${r.recipeOnly.length} 个${RECIPE_ONLY}`);
+  if (r.behind?.length) more.push(`其中 ${r.behind.length} 个里面是上次存下的样子，刚才的改动打开时要重新算`);
   if (r.notesUnread?.length) more.push(`其中 ${r.notesUnread.length} 个世界的 AI 写的东西这次没读出来，文件里可能不全。刷新页面再存一次`);
   if (r.dropped) more.push('有的世界 AI 写的东西太多，放不下，没带上');
   if (r.olderLeft.length) more.push(`其中 ${r.olderLeft.length} 个留着的旧版本太大，没带上，世界本身带上了`);
   return more;
 }
 
-function handOverAll(r: SavedBackup) {
+function handOverAll(r: SavedBackup, marks: Marks) {
   const extra = allWarnings(r);
   const warn = extra.length > 0;
   const total = sizeText(r.bytes);
@@ -347,6 +354,7 @@ function handOverAll(r: SavedBackup) {
     const saved = (where: string): ToastInput => ({ kind, ...(warn ? {} : { dot: true }), text: `${count} 个世界已存成一个文件`, more: [`${where}，${total}。以后点「打开存档文件」选它，这些世界都会回来`, ...extra] });
     if (!tapToSave()) {
       download(f.file, f.name);
+      noteGiven(marks);
       return say(saved(f.name));
     }
     return say({
@@ -361,6 +369,7 @@ function handOverAll(r: SavedBackup) {
         act: 'save-to-phone',
         onClick: () =>
           void saveOnPhone(f.file, f.name).then((got) => {
+            if (got !== 'cancelled') noteGiven(marks);
             if (got === 'shared') clearToast(TOAST);
             else if (got === 'downloaded') say(saved('在手机的「下载」里'));
           }),
@@ -372,6 +381,7 @@ function handOverAll(r: SavedBackup) {
   const split = `一个文件放不下，分成 ${n} 个。打开时都选上`;
   const after = (i: number) => {
     const left = n - i - 1;
+    if (!left) noteGiven(marks);
     if (!left) return say({ kind, ...(warn ? {} : { dot: true }), text: `${count} 个世界已存成 ${n} 个文件`, more: [`一共 ${total}。以后点「打开存档文件」都选上，这些世界都会回来`, ...extra] });
     say({
       kind: 'ok',
@@ -411,6 +421,8 @@ async function saveAll(): Promise<void> {
   if (noFilesHere() || !begin()) return;
   const ac = new AbortController();
   let cancelled = false;
+  const cur = currentWorld();
+  const marks = marksOf([...listWorlds().map((w) => w.id), ...(cur && !isStored(cur.id) && currentUnsaved() ? [cur.id] : [])]);
   const now: { p: WorldFileProgress | null } = { p: null };
   const bar = progressBar(SAVE_WAIT_MS, () => {
     const { p } = now;
@@ -443,7 +455,7 @@ async function saveAll(): Promise<void> {
   if (cancelled) return;
   busy = false;
   bar.stop();
-  if (r.ok) return handOverAll(r);
+  if (r.ok) return handOverAll(r, marks);
   if (r.kind === 'cancelled') return say({ kind: 'ok', text: '已取消，没有存下文件' });
   if (r.kind === 'missing') return notify({ kind: 'error', text: '「我的世界」里还没有世界' });
   const where = now.p?.total ? `存到第 ${Math.min(now.p.done + 1, now.p.total)} 个时` : '';
@@ -534,6 +546,7 @@ async function openOneWorld(file: File, onText: (text: string, fileName: string)
   } else {
     note = { kind: 'ok', text: `已打开存档「${title}」`, more: ['已存进「我的世界」，下次不用再选文件'] };
   }
+  noteGiven(marksOf([placed.id]));
   if (placed.status === 'added' || placed.status === 'copied') {
     markFromFile(placed.id);
     if (placed.kept.memOnly) note = { ...note, kind: 'warn', more: ['浏览器不让网页存数据，世界只留在这个页面里，这个文件先别删'] };
@@ -632,7 +645,9 @@ function sayRestored(r: OpenedWorldFiles, old: Awaited<ReturnType<typeof importO
   for (const s of r.sets) if (s.missing.length) notes.push(`分成 ${s.parts} 个文件的还差第 ${s.missing.join('、')} 个，一起选上再打开一次`);
   if (r.cut) notes.push('有个文件没存完整，读得到的都放回了');
   if (notesLost) notes.push('有的 AI 写的东西没能放回来（浏览器存储已满）');
-  const trouble = badN > 0 || left > 0 || olderLost > 0 || r.cut || memOnly || notesLost || r.sets.some((s) => s.missing.length > 0);
+  const unread = r.notesUnread?.length ?? 0;
+  if (unread) notes.push(`${unread} 个世界的 AI 写的东西这次没读进来。世界不受影响，文件先别删`);
+  const trouble = badN > 0 || left > 0 || olderLost > 0 || r.cut || memOnly || notesLost || unread > 0 || r.sets.some((s) => s.missing.length > 0);
   if (added) return say({ kind: trouble ? 'warn' : 'ok', text: `已放回 ${added} 个世界`, more: notes });
   if (left) return say({ kind: 'error', text: '没能放回来', more: notes });
   say({ kind: trouble ? 'warn' : 'ok', text: '这些世界都已经在「我的世界」里了', more: notes.filter((x) => !x.endsWith('没重复放')) });
@@ -669,7 +684,9 @@ async function restoreFiles(picks: readonly PickedFile[], firstName: string): Pr
   );
   busy = false;
   bar.stop();
-  for (const id of [...r.added.map((w) => w.id), ...r.copied.map((w) => w.id), ...(r.recipes?.added ?? []), ...old.added]) markFromFile(id);
+  const placed = [...r.added.map((w) => w.id), ...r.copied.map((w) => w.id), ...(r.recipes?.added ?? []), ...old.added];
+  for (const id of placed) markFromFile(id);
+  noteGiven(marksOf([...placed, ...r.same.map((w) => w.id)]));
   sayRestored(r, old, firstName);
 }
 

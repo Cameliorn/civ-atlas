@@ -473,7 +473,24 @@ describe('撤销过,记录被回退了', () => {
     expect(await latestOf(a)).not.toBeNull();
     await dropOrphans();
     expect((await resultHeads(a)).length).toBe(1);
-    expect((await trashInfo()).held).toBe(1);
+    expect(await trashInfo()).toMatchObject({ count: 0, bytes: 0, held: 0 });
+    expect((await rescueLostWorlds()).rescued).toEqual([a]);
+  });
+
+  it('删掉的世界的个数:等着认回来的不算,「现在清掉」也不清它', async () => {
+    const a = await undoneThenRolledBack();
+    const b = await makeWorld('乙');
+    openWorld(await makeWorld('丙'));
+    const gone = saveStore.deleteWorld(b)!;
+    expect(gone.id).toBe(b);
+    const info = await trashInfo();
+    expect(info.count).toBe(1);
+    expect(info.ids).toEqual([b]);
+    const cl = await clearTrashNow();
+    expect(cl.cleared).toEqual([b]);
+    expect(cl.kept).toEqual([a]);
+    expect(await latestOf(a)).not.toBeNull();
+    expect(await trashInfo()).toMatchObject({ count: 0, ids: [] });
     expect((await rescueLostWorlds()).rescued).toEqual([a]);
   });
 
