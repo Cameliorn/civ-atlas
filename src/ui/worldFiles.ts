@@ -46,7 +46,7 @@ import { bundleFileName, bundleText, cleanNotes, importBundle, parseBundle, same
 import { MAX_WORLDS, cleanSyncMeta, currentSave, currentWorld, flushThumb, isStored, keepOriginal, listWorlds, loadWorld, markTrash, newWorldId, nextTitle, persistent, putSyncedWorld, rawWorld, storedCount, unmarkTrash, type StoredWorld, type SyncMeta } from './saveStore';
 import { APP_COMMIT, APP_VERSION } from './version';
 import { holdWorld } from './worldHolds';
-import { errKind, noteListed, packPage, settleForFile, thumbBytes, thumbUrl, vaultCall, type VaultCaller } from './worldStore';
+import { clearedAt, errKind, noteListed, packPage, settleForFile, thumbBytes, thumbUrl, vaultCall, type VaultCaller } from './worldStore';
 
 /** 全部世界一个文件最大多少字节:和单个世界文件的本机上限一样。打开时不用整个读进内存,定它是因为更大的 Blob 手机上拼不出来、下载也容易断 */
 export const WORLD_BACKUP_MAX_BYTES = 1e9;
@@ -518,6 +518,44 @@ async function keepAs(id: string, looked: LookedWorldFile, o: { save?: SaveFile 
   const notes = cleanNotes(f.author?.notes);
   const notesLost = notes.length > 0 && !replaceNotes(id, notes);
   return { ok: true, id, notesLost, memOnly: !persistent(), olderLost };
+}
+
+/**
+ * 从账号取回来的文件放进这个编号名下(换设备打开传过的世界、别人打开短链接):核对过才放,「我的世界」不动。
+ * AI 正文:账号里的存档带的可能是更早的一份(写得太多时存档不带),文件里有的以文件为准,本机另有的留着。不抛错。
+ * still:每写一步前再问一次还要不要;wiped = 这台设备上的世界被清了(退出登录选了删掉),已经写进去的也删掉
+ */
+export async function adoptWorldFile(id: string, file: Blob, still: () => 'go' | 'stop' | 'wiped' = () => 'go'): Promise<{ ok: true; save: SaveFile; warnings: string[] } | Trouble<KeepTrouble>> {
+  const mark = clearedAt();
+  const now = () => (clearedAt() !== mark ? 'wiped' : still());
+  const stopped = trouble<KeepTrouble>('failed', '账号变了，没有放进来');
+  const f = await look(file);
+  if (!f.ok) return f;
+  if (now() !== 'go') return stopped;
+  const free = holdWorld(id);
+  try {
+    await adoptOf(id, f, file, 'made');
+    const skip = f.authorTrouble === 'skipped' ? f.manifest.parts.find((p) => p.name === 'author')?.sum : undefined;
+    await vaultCall('patchState', [id, { checked: f.content, ...(skip ? { authorSkip: skip } : {}) }]).catch(() => {});
+    if (now() === 'wiped') {
+      await vaultCall('purgeWorld', [id]).catch(() => {});
+      return stopped;
+    }
+    await notesReady([id]);
+    if (now() !== 'go') return stopped;
+    const fromFile = cleanNotes(f.author?.notes);
+    if (fromFile.length) {
+      const keys = new Set(fromFile.map((n) => n.key));
+      const here = exportNotes(id);
+      const merged = [...fromFile, ...here.filter((n) => !keys.has(n.key))];
+      if (JSON.stringify(merged) !== JSON.stringify(here)) replaceNotes(id, merged);
+    }
+    return { ok: true, save: f.save, warnings: f.warnings };
+  } catch (e) {
+    return asKeepTrouble(e);
+  } finally {
+    free();
+  }
 }
 
 /** 本机有这个世界但内容不一样时怎么办:copy = 另存一份,本机的不动;ask = 先不放,交回去让界面问(之后可以 keepWorldFile) */
