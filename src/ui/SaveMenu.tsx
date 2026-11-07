@@ -36,7 +36,7 @@ import { useSession } from '../account/session';
 import { saveAsNew } from './FrozenWorld';
 import { LONG_HINT, MomentCheck, copyShareLink, momentNow, shareCopiedToast, useMomentOn } from './shareMoment';
 import { contentTrouble, pendingOf } from './worldStore';
-import { SHARE_BANNED, SUBMIT_WORLD_MAX, askPhone, phoneRequired, submitMenuItem, useSubmitBan, useSubmitWorldOn } from './submitView';
+import { SHARE_BANNED, SUBMIT_WORLD_MAX, askPhone, phoneRequired, submitMenuItem, useSubmitBan, useSubmitWorldOn, type SubmitWork } from './submitView';
 
 export interface SaveMenuProps {
   /** 世界生成完了(能存) */
@@ -158,7 +158,7 @@ export function SaveMenu({ ready, icon }: SaveMenuProps) {
   useEffect(() => {
     if (open && session) void askFull();
   }, [open, !!session]);
-  // 投到作品墙:只投有历史的世界(新建中、只有地图的、只剩配方的不露)
+  // 投到作品墙:只投有历史的世界(新建中、只有地图的、只剩配方的不露;地图在我的世界「地图」里投)
   const submitOn = useSubmitWorldOn(open) && !!cur && cur.kind !== 'draft' && !curStored?.draft && !curStored?.map && !recipeOnly;
   const banned = useSubmitBan();
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -279,14 +279,15 @@ export function SaveMenu({ ready, icon }: SaveMenuProps) {
   const share = () => {
     if (!cur) return;
     setOpen(false);
-    if (banned) return openSubmitDialog(cur.id, title ?? '', 'ban-share');
+    if (banned) return openSubmitDialog({ kind: 'world', worldId: cur.id, title: title ?? '' }, 'ban-share');
     openShareDialog(cur.id, title ?? '');
   };
   const submitClick = () => {
     if (!submitItem || !cur || submitItem.act === 'none') return;
     setOpen(false);
-    if (submitItem.act === 'ban') return openSubmitDialog(cur.id, title ?? '', 'ban');
-    const go = () => openSubmitDialog(cur.id, title ?? '');
+    const work: SubmitWork = { kind: 'world', worldId: cur.id, title: title ?? '' };
+    if (submitItem.act === 'ban') return openSubmitDialog(work, 'ban');
+    const go = () => openSubmitDialog(work);
     if (phoneRequired()) askPhone({ for: 'submit', then: go });
     else go();
   };
