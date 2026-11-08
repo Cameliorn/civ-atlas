@@ -73,7 +73,7 @@ import { GLOBE_READY, isCurved, isGraticuleStep, isMapProjection, setContourKind
 import { recipeChanges, recipeKey, recipeOfSave } from '../../gen/snapshot';
 import { endLoadWatch, noteOpenTrouble, openGuardReady, openingClear, openingShown, openingStart, vaultAllowed, watchLoad } from '../openGuard';
 import { frozenResult, resultHeads } from '../resultStore';
-import { keptMapHere, settleKeptWorld } from '../worldStore';
+import { keptMapHere, settleKeptWorld, vaultCall } from '../worldStore';
 import { fullOverview } from '../fullWorldView';
 import { sizeText } from '../sizeWords';
 import { attachWorld, briefError, briefWarning, currentOriginal, currentWorld, deleteWorld, detachWorld, dropPendingEdits, flushThumb, importSave, isStored, loadWorld, markFromFile, markOpened, newWorldId, notify, persistent, sameOrigin, setWorldStats, storageFullWhy, storedCount } from '../saveStore';
@@ -111,6 +111,7 @@ import {
   type WallView,
 } from './worldTarget';
 import { simNowFor } from './simNow';
+import { mapNowFor } from './mapNow';
 import { forgetSimError } from '../sim/simClient';
 
 /**
@@ -286,13 +287,14 @@ export function useWorldLoad(deps: WorldLoadDeps) {
       civYears.current = yearsFor(t.kind === 'draft' && !t.fullCiv, t.edits);
       // 照故事找的世界不带推演插件(找的时候没带)
       simNowFor(t.fullCiv ? null : t.id);
+      mapNowFor(t.fullCiv ? null : t.id);
       forgetSimError();
       civSetup.current = setupFor(t.kind === 'draft' && !t.fullCiv, t.edits);
       storyAfterYears.current = null;
       // 新建的世界能编辑地形:线程留着整张主图,第一笔就能只重铺变了的那块。
       // 新建界面先看的是地图(星球),推几千年的历史比生成地形、铺像素慢:地图先交、先换上,历史随后(mapFirst);
       // 写实画风的整张像素层也让线程画好随地图交来(paint),换上之前主线程不用自己再分小步画
-      const req: WorkerRequest = { type: 'generate', id, params: p, scale: 1, terrain: [...terrain], sketch: t.edits.sketch, ...namesOpt(t.edits.nameMix), ...yearsOpt(civYears.current), ...setupOpt(civSetup.current), ...(t.kind === 'draft' ? { keep: true, mapFirst: true as const, paint: paintLooks(drawKey.current, mapViewRef.current.sat) } : {}), renames: t.edits.names, characters: t.edits.characters };
+      let req: Extract<WorkerRequest, { type: 'generate' }> = { type: 'generate', id, params: p, scale: 1, terrain: [...terrain], sketch: t.edits.sketch, ...namesOpt(t.edits.nameMix), ...yearsOpt(civYears.current), ...setupOpt(civSetup.current), ...(t.kind === 'draft' ? { keep: true, mapFirst: true as const, paint: paintLooks(drawKey.current, mapViewRef.current.sat) } : {}), renames: t.edits.names, characters: t.edits.characters };
       mapFirst.current = null;
       setMapEarly(false);
       frozenLoad.current = null;
@@ -437,8 +439,15 @@ export function useWorldLoad(deps: WorldLoadDeps) {
           if (pluginsUiOn()) {
             await import('../plugins/worldPlugins').then((m) => m.loadSimNow(t.id)).catch(() => {});
             if (id !== reqId.current) return;
-            civSetup.current = setupFor(t.kind === 'draft' && !t.fullCiv, t.edits);
           }
+          // 用了地图插件的世界(插件界面关着也一样):请求都带上它们,线程才认得出是哪张地图;本机没有同一版的改地形先问
+          const used = await vaultCall('worldPluginsOf', [t.id]).catch(() => null);
+          if (used?.plugins.some((p) => p.role === 'map')) await import('../plugins/mapWorld').then((m) => m.loadMapNow(t.id, used.plugins, () => id === reqId.current)).catch(() => {});
+          if (id !== reqId.current) return;
+          civSetup.current = setupFor(t.kind === 'draft' && !t.fullCiv, t.edits);
+          // 读不了退回按配方生成时也带上这些插件:不带的话长出来的是另一张图,还会存回去盖掉它
+          req = { ...req, ...setupOpt(civSetup.current) };
+          if (genReq.current) genReq.current = req;
           if (id !== reqId.current) return;
           sendLoad({ vault: { id: t.id, recipe, generator: stored.generator }, ...(original ? { original } : {}) }, stored.generator, fail);
         })().catch(() => {
