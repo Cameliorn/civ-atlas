@@ -101,6 +101,8 @@ export interface PackInput extends WorldValues {
   /** 第几次修订(不给 = 第 1 次) */
   revision?: WorldRevision;
   extras?: WorldExtra[];
+  /** 地图插件出的图层(块名 → 内容,见 worldRun.ts 的 mapLayerParts):地图那一块不带图层,要存的从这里另存成块 */
+  layers?: readonly { name: string; value: PluginLayerValue }[];
   /** 文件最大多少字节(不给 = 本机存取的上限;传上服务器的传 ZIP_UPLOAD_MAX_BYTES) */
   maxBytes?: number;
 }
@@ -131,6 +133,12 @@ export function knownPart(p: SnapshotPart, schema?: number, migrations?: Migrati
   const known = KNOWN_PARTS.get(p.name);
   if (!known) throw new Error(`认不出这一块:${p.name}`);
   return packedFrom(p, schema ?? currentSchema(p.name, migrations), known.need);
+}
+
+/** 后台线程打好的一块:认得的块同 knownPart;地图插件出的图层块(layer.<插件编号>.<图层编号>)by 写插件编号 */
+export function offeredPart(p: SnapshotPart, schema?: number, migrations?: MigrationTable): PackedPart {
+  const ids = pluginLayerOf(p.name);
+  return ids ? packedFrom(p, PLUGIN_LAYER_SCHEMA, 'extra', ids[0]) : knownPart(p, schema, migrations);
 }
 
 /** 附加数据打包:need 是 extra */
@@ -191,17 +199,20 @@ export async function packThumb(bytes: Uint8Array, migrations?: MigrationTable):
   return { info: { name: 'thumb', file: fileOf('thumb', 'none'), schema: currentSchema('thumb', migrations), sum, bytes: bytes.length, zip: 'none', need: 'extra' }, data: bytes };
 }
 
-/** 去掉回放快照(不存)、各段世界的网格(和地图同一套) */
+/** 去掉回放快照(不存)、各段世界的网格(和地图同一套)、地图插件的图层(另存成图层块) */
 function mapValue(map: World): World {
-  return { ...map, history: [] };
+  const { mapLayers: _l, ...rest } = map;
+  void _l;
+  return { ...rest, history: [] };
 }
 
 function erasValue(e: WorldEras): WorldEras {
   return {
     baseKey: e.baseKey,
     eras: e.eras.map(({ key, world }) => {
-      const { mesh: _mesh, ...rest } = world as Omit<World, 'mesh'> & { mesh?: unknown };
+      const { mesh: _mesh, mapLayers: _l, ...rest } = world as Omit<World, 'mesh'> & { mesh?: unknown };
       void _mesh;
+      void _l;
       return { key, world: { ...rest, history: [] } };
     }),
   };
@@ -268,6 +279,11 @@ export async function packWorldParts(input: PackInput): Promise<PackedWorld> {
   if (input.author) parts.push(await packKnown('author', input.author));
   if (input.thumb) parts.push(await packThumb(input.thumb));
   parts.push(...split.parts, ...layers.parts);
+  for (const l of input.layers ?? []) {
+    const ids = pluginLayerOf(l.name);
+    if (!ids) throw new Error(`插件图层不能叫 ${l.name}`);
+    parts.push(await packPluginLayer(ids[0], ids[1], l.value));
+  }
   for (const x of input.extras ?? []) parts.push(await packExtra(x));
   return { manifest: buildManifest(input, parts.map((p) => p.info)), parts };
 }
