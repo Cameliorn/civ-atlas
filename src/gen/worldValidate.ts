@@ -347,12 +347,16 @@ function checkPartInfo(raw: unknown, at: string, opts: ManifestOptions): void {
   }
 }
 
+/** 清单里插件名字最长几个字(和插件文件清单的 name 一样) */
+const PLUGIN_NAME_MAX = 40;
+
 function checkPlugin(raw: unknown, at: string): void {
   const p = obj(raw, at);
   if (typeof p.id !== 'string' || !SHORT_NAME.test(p.id)) broken(`${at}.id 不合规矩`);
   if (typeof p.version !== 'string' || !VERSION_TEXT.test(p.version)) broken(`${at}.version 不合规矩`);
   if (typeof p.sum !== 'string' || !SUM.test(p.sum)) broken(`${at}.sum 不是 SHA-256`);
   if (typeof p.role !== 'string' || !SHORT_NAME.test(p.role)) broken(`${at}.role 不合规矩`);
+  if (p.name !== undefined && (typeof p.name !== 'string' || !p.name.trim() || p.name.length > PLUGIN_NAME_MAX || CONTROL.test(p.name))) broken(`${at}.name 不合规矩`);
   if (p.params !== undefined && JSON.stringify(obj(p.params, `${at}.params`)).length > PLUGIN_PARAMS_MAX) broken(`${at}.params 太大`);
 }
 

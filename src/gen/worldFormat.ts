@@ -133,6 +133,17 @@ export const PLUGIN_LAYER_MAX_BYTES = 8 * 1000 * 1000;
 export const PLUGIN_LAYERS_MAX = 16;
 export const pluginLayerPart = (pluginId: string, layerId: string): string => `${PLUGIN_LAYER_PREFIX}${pluginId}.${layerId}`;
 
+/**
+ * 工具插件交的图层编号(字母、数字、- 和 _,最长 32)存进世界时块名里写成什么:合 PLUGIN_LAYER_ID 的原样用,
+ * 有大写、下划线或太长的换成 h + 编号的 8 位十六进制散列(FNV-1a)
+ */
+export function savedLayerId(layerId: string): string {
+  if (PLUGIN_LAYER_ID.test(layerId)) return layerId;
+  let h = 0x811c9dc5;
+  for (let i = 0; i < layerId.length; i++) h = Math.imul(h ^ layerId.charCodeAt(i), 0x01000193) >>> 0;
+  return `h${h.toString(16).padStart(8, '0')}`;
+}
+
 /** 块名 → [插件编号, 图层编号];不是合规矩的图层块名 = null */
 export function pluginLayerOf(name: string): [string, string] | null {
   if (!name.startsWith(PLUGIN_LAYER_PREFIX)) return null;
@@ -173,6 +184,8 @@ export interface WorldPlugin {
   sum: string;
   /** 它干什么用的(sim 换推演规则之类) */
   role: string;
+  /** 插件叫什么(清单里的 name;没装这个插件的人看到的就是它),最长 40 字 */
+  name?: string;
   /** 插件的参数(只有数据,大小有上限) */
   params?: Record<string, unknown>;
 }

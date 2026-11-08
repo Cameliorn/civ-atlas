@@ -45,7 +45,7 @@ const latest = async (): Promise<WorldManifest> => (await readRevision(sample.id
 describe('插件存进世界的数据', () => {
   it('记录照插件文件来:编号、第几版、文件指纹、种类', async () => {
     const opened = await openPluginFile(await goodPlugin());
-    expect(tool).toEqual({ id: 'route-measure', version: '1.0.0', sum: opened.sum, role: 'tool' });
+    expect(tool).toEqual({ id: 'route-measure', version: '1.0.0', sum: opened.sum, role: 'tool', name: opened.manifest.name });
   });
 
   it('还没存过的世界存不了;没存过数据读出来是 null', async () => {
@@ -169,6 +169,15 @@ describe('世界用到的插件和本机装没装', () => {
       ['route-measure', 'same', true, true],
       ['magic-sim', 'other', true, false],
       ['orphan', 'none', false, true],
+    ]);
+  });
+
+  it('存了图层的也列出来,连同存了哪几层', () => {
+    const layer = (pid: string, l: string) => ({ name: `layer.${pid}.${l}`, file: `parts/layer.${pid}.${l}.gz`, schema: 1, sum: 'a'.repeat(64), bytes: 1, zip: 'gzip', need: 'extra' as const, by: pid });
+    const uses = pluginsInWorld({ plugins: [tool], parts: [layer('route-measure', 'a'), layer('coast-distance', 'coast'), layer('route-measure', 'b')] }, []);
+    expect(uses.map((u) => [u.id, u.layers, !!u.plugin])).toEqual([
+      ['route-measure', ['a', 'b'], true],
+      ['coast-distance', ['coast'], false],
     ]);
   });
 });

@@ -37,10 +37,29 @@ import { LOCAL_HEAD_MAX_BYTES, LOCAL_PART_MAX_BYTES, packValue, partBytes, sha25
 import { GENERATOR_VERSION } from './gen/edits';
 import { VAULT_DB, type RosterMarks } from './worldRoster';
 import type { SaveFile } from './gen/savefile';
-import { buildManifest, historyParts, knownPart, manifestBytes, opaqueParts, openWorldFile, packExtra, packKnown, packThumb, zipWorld, type PackedPart } from './gen/worldFile';
-import { KNOWN_PARTS, PLUGIN_DATA_MAX_BYTES, WorldFileError, asWorldFileError, pluginDataPart, type AuthorContent, type AuthorNote, type WorldMade, type WorldManifest, type WorldPartInfo, type WorldPlugin, type WorldReaders } from './gen/worldFormat';
+import { buildManifest, historyParts, knownPart, manifestBytes, opaqueParts, openWorldFile, packExtra, packKnown, packPluginLayer, packThumb, zipWorld, type PackedPart } from './gen/worldFile';
+import {
+  KNOWN_PARTS,
+  PLUGIN_DATA_MAX_BYTES,
+  PLUGIN_LAYERS_MAX,
+  PLUGIN_LAYER_MAX_BYTES,
+  PLUGIN_LAYER_PREFIX,
+  WorldFileError,
+  asWorldFileError,
+  pluginDataPart,
+  pluginLayerOf,
+  pluginLayerPart,
+  type AuthorContent,
+  type AuthorNote,
+  type PluginLayerValue,
+  type WorldMade,
+  type WorldManifest,
+  type WorldPartInfo,
+  type WorldPlugin,
+  type WorldReaders,
+} from './gen/worldFormat';
 import { currentSchema } from './gen/worldMigrate';
-import { parseManifest, validateThumb } from './gen/worldValidate';
+import { parseManifest, validatePluginLayer, validateThumb } from './gen/worldValidate';
 import { writeZip, type ZipInput } from './gen/zipStore';
 
 export { VAULT_DB };
@@ -882,7 +901,7 @@ function pluginsAfter(list: readonly WorldPlugin[], plugin: WorldPlugin, stored:
   const at = list.findIndex((x) => x.id === plugin.id);
   const had = at < 0 ? undefined : list[at];
   if (!stored) return had?.role === 'tool' && !parts.some((p) => p.by === plugin.id) ? list.filter((x) => x.id !== plugin.id) : [...list];
-  const next: WorldPlugin = { ...had, id: plugin.id, version: plugin.version, sum: plugin.sum, role: plugin.role };
+  const next: WorldPlugin = { ...had, id: plugin.id, version: plugin.version, sum: plugin.sum, role: plugin.role, ...(plugin.name !== undefined ? { name: plugin.name } : {}) };
   if (at < 0) return [...list, next];
   return list.flatMap((x, i) => (i === at ? [next] : x.id === plugin.id ? [] : [x]));
 }
@@ -917,6 +936,95 @@ export async function changePluginData(id: string, plugin: WorldPlugin, data: { 
       else infos.delete(name);
       const parts = sortParts(infos.values());
       const plugins = pluginsAfter(prev.plugins, plugin, !!packed, parts);
+      const n = maxN + 1;
+      const manifest: WorldManifest = { ...prev, parts, plugins, revision: { n, parent: await sha256(new TextEncoder().encode(base.text)) } };
+      if (sameManifest(prev, manifest)) return { status: 'same', n: base.n };
+      const text = manifestBytes(manifest);
+      parseManifest(text, { readers: { ...prev.readers } });
+      if (packed && !(await existing([partKey(packed.info)])).size) await storePart(packed);
+      const row: RevisionRow = { id, n, text: new TextDecoder().decode(text), keys: [...new Set(parts.map(partKey))], content: contentOf(parts), recipeKey: base.recipeKey, generator: base.generator, source: 'made', at: Date.now() };
+      if ((await publish(row, maxN)) === 'ok') return { status: 'saved', n };
+    }
+    throw new VaultError('corrupt', '写清单时块总是不全');
+  } catch (e) {
+    throw asVaultError(e);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 插件存进世界的图层
+
+/** 存在世界里的一个工具插件的图层:块名、哪个插件、图层编号(块名里那一段)、内容、清单里记的这个插件(没记 = null) */
+export interface PluginLayerRead {
+  name: string;
+  by: string;
+  layer: string;
+  data: PluginLayerValue;
+  plugin: WorldPlugin | null;
+}
+
+/**
+ * 这个世界最新修订里存着的工具插件的图层(按清单里的先后;cells = 地图有几个地块)。
+ * 跟着历史走的(推演插件的)不在这里;读不出来、核对不过、结构比软件新的跳过
+ */
+export async function readPluginLayers(id: string, cells: number): Promise<PluginLayerRead[]> {
+  try {
+    const head = await readRevision(id, undefined, []);
+    if (!head) return [];
+    const all = head.manifest.parts.map((p) => p.name);
+    const skip = new Set([...opaqueParts(head.manifest.parts), ...historyParts(all)]);
+    const names = all.filter((n) => n.startsWith(PLUGIN_LAYER_PREFIX) && !skip.has(n));
+    if (!names.length) return [];
+    const got = await readRevision(id, head.head.n, names);
+    const out: PluginLayerRead[] = [];
+    for (const p of got?.parts ?? []) {
+      const ids = pluginLayerOf(p.info.name);
+      if (!ids) continue;
+      try {
+        const v = unpackValue(await partBytes(p.info as Pick<SnapshotPart, 'name' | 'bytes' | 'sum' | 'zip'>, new Uint8Array(p.data), PLUGIN_LAYER_MAX_BYTES));
+        validatePluginLayer(v, { cells, regions: 0 }, `插件图层 ${p.info.name}`);
+        if (v.unit !== 'cell' || v.years !== undefined) continue;
+        out.push({ name: p.info.name, by: ids[0], layer: ids[1], data: v, plugin: head.manifest.plugins.find((x) => x.id === ids[0]) ?? null });
+      } catch (e) {
+        if (asWorldFileError(e).kind === 'memory') throw e;
+      }
+    }
+    return out;
+  } catch (e) {
+    throw asVaultError(e);
+  }
+}
+
+/** 存插件图层:many = 这个世界存的插件图层已经满了(PLUGIN_LAYERS_MAX),什么都没写 */
+export type PluginLayerWrote = PluginDataWrote | { status: 'many' };
+
+/**
+ * 换掉(data = null:拿掉)这个世界里存着的一个工具插件的图层(块名 layer.<插件编号>.<图层编号>),写一份新修订,别的块、配方都照上一份;
+ * 清单的插件记录和存数据一样(pluginsAfter;plugin.sum 是空串 = 不动)。还没有修订的世界存不了(nobase)
+ */
+export async function changePluginLayer(id: string, plugin: WorldPlugin, layerId: string, data: PluginLayerValue | null): Promise<PluginLayerWrote> {
+  try {
+    const name = pluginLayerPart(plugin.id, layerId);
+    if (data) {
+      validatePluginLayer(data, { cells: data.values.length, regions: 0 }, `插件图层 ${name}`);
+      if (data.unit !== 'cell' || data.years !== undefined) throw new VaultError('failed', '工具插件的图层只能按地块、只有一份');
+    }
+    const packed = data ? await packPluginLayer(plugin.id, layerId, data) : null;
+    for (let tries = 0; tries < COMMIT_TRIES; tries++) {
+      const rows = await rowsOf(id);
+      const maxN = rows.at(-1)?.n ?? 0;
+      const base = chainOf(rows).at(-1);
+      const prev = base ? manifestOf(base) : null;
+      if (!base || !prev) return { status: 'nobase' };
+      const had = prev.parts.some((p) => p.name === name);
+      if (!packed && !had) return { status: 'same', n: base.n };
+      if (packed && !had && prev.parts.filter((p) => p.name.startsWith(PLUGIN_LAYER_PREFIX)).length >= PLUGIN_LAYERS_MAX) return { status: 'many' };
+      const infos = new Map<string, WorldPartInfo>(prev.parts.map((p) => [p.name, p]));
+      if (packed) infos.set(name, packed.info);
+      else infos.delete(name);
+      const parts = sortParts(infos.values());
+      // 没给指纹 = 清单里的插件记录不动(调用的地方不知道插件是哪一版)
+      const plugins = plugin.sum ? pluginsAfter(prev.plugins, plugin, !!packed, parts) : [...prev.plugins];
       const n = maxN + 1;
       const manifest: WorldManifest = { ...prev, parts, plugins, revision: { n, parent: await sha256(new TextEncoder().encode(base.text)) } };
       if (sameManifest(prev, manifest)) return { status: 'same', n: base.n };
@@ -1015,6 +1123,13 @@ export async function adoptFile(req: AdoptRequest): Promise<{ n: number }> {
 export async function latestOf(id: string): Promise<RevisionHead | null> {
   const last = chainOf(await rowsOf(id)).at(-1);
   return last ? headOf(last) : null;
+}
+
+/** 一个世界最新的修订里记的插件和各块(看用到了哪些插件、存了什么);没有修订、清单读不懂 = null */
+export async function worldPluginsOf(id: string): Promise<Pick<WorldManifest, 'plugins' | 'parts'> | null> {
+  const last = chainOf(await rowsOf(id)).at(-1);
+  const m = last ? manifestOf(last) : null;
+  return m ? { plugins: m.plugins, parts: m.parts } : null;
 }
 
 /** 一个世界最新的修订里只当字节留着的块(gen/worldFile.ts 的 opaqueParts):有就不能公开分享、投稿;没有修订、清单读不懂 = 没有 */
@@ -1347,5 +1462,5 @@ export async function rosterCopy(id: string): Promise<{ recipe: SaveFile; thumb:
 }
 
 /** 主线程通过后台线程调的几样(worldVaultWorker.ts、ui/worldStore.ts) */
-export const vaultOps = { commitWorld, draftFile, adoptFile, latestOf, revisionsOf, readRevision, revisionFile, zipBlobs, sweepParts, spaceOf, spaceBoard, fullStates, purgeWorld, clearVault, stateOf, patchState, patchStates, rosterOf, rosterCopy, readAuthor, changeAuthor, readPluginData, changePluginData, opaquePartsOf };
+export const vaultOps = { commitWorld, draftFile, adoptFile, latestOf, revisionsOf, readRevision, revisionFile, zipBlobs, sweepParts, spaceOf, spaceBoard, fullStates, purgeWorld, clearVault, stateOf, patchState, patchStates, rosterOf, rosterCopy, readAuthor, changeAuthor, readPluginData, changePluginData, readPluginLayers, changePluginLayer, worldPluginsOf, opaquePartsOf };
 export type VaultOps = typeof vaultOps;
