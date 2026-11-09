@@ -37,7 +37,7 @@
  * 没有 WebGL(或显卡丢了):中间一直是平常的平面地图;样式照样能换。
  * 系统设了"减少动态效果":地球仪不自转,换样式和投影只做很短的过渡。
  */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { World, WorldParams } from '../../gen/world';
 import { DEFAULT_PARAMS } from '../../gen/world';
 import type { Civ } from '../../gen/civ/types';
@@ -139,8 +139,12 @@ import { MapPickHost, PuzzleIcon, SimPickHost } from '../plugins/entry';
 import { pluginsUiOn } from '../plugins/flag';
 import { useSimNow } from '../world/simNow';
 import { useMapNow } from '../world/mapNow';
+import { useMapFail } from '../world/mapFail';
 import '../worlds.css';
 import './studio.css';
+
+/** 地图插件长不出地图的卡:出错时才下载 */
+const MapFailCard = lazy(() => import('../plugins/MapFailCard').then((m) => ({ default: m.MapFailCard })));
 
 /** 新建时能看的样式(不用历史的;政区、民族建好以后才有) */
 export const STUDIO_STYLES: { id: MapLayer; name: string; hint: string }[] = [
@@ -438,6 +442,15 @@ export function Studio(p: StudioProps) {
   const [mapPage, setMapPage] = useState(false);
   const mapNow = useMapNow();
   const mapNames = mapNow?.list.map((x) => x.name ?? x.id) ?? [];
+  /** 地图插件长不出这张地图(星球上那张卡;改了选的、重新长就收起) */
+  const mapFail = useMapFail();
+  // 手机:卡在最上面,卡片退回「地图」那一页、不拉到最高(不挡着卡)
+  useEffect(() => {
+    if (!mapFail || mapFail.quiet || !p.phone) return;
+    setMapPage(false);
+    setSheetFull(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapFail]);
   const mapLocked = simOn && !found && mapNames.length > 0;
   /** 起源页上:星球停住时的样子(圆点按它摆;动着 = null)、底下的提示(点错了的那句和画虚线圈的地方,过几秒收起) */
   const [pinPose, setPinPose] = useState<StillPose | null>(null);
@@ -1553,9 +1566,16 @@ export function Studio(p: StudioProps) {
       <span className="sb-row-main">
         <b>地图插件</b>
       </span>
-      <span className="sb-row-side sb-origin" data-side="map-plugins">
-        {mapNames.length ? mapNames.join('、') : '不用'}
-      </span>
+      {mapFail ? (
+        <span className="sb-row-side sb-origin nw-map-warn" data-side="map-plugins">
+          <Icon name="warn" size={14} />
+          {mapFail.name}出错了
+        </span>
+      ) : (
+        <span className="sb-row-side sb-origin" data-side="map-plugins">
+          {mapNames.length ? mapNames.join('、') : '不用'}
+        </span>
+      )}
       <Icon name="chevron" size={14} className="sb-chev" />
     </button>
   );
@@ -1788,17 +1808,17 @@ export function Studio(p: StudioProps) {
     </button>
   );
   const createBtn = (
-    <button className="nw-create" data-act="create-world" disabled={p.busy || !p.ready || out > 0 || importing || (image && !applied)} onClick={askCreate}>
+    <button className="nw-create" data-act="create-world" disabled={p.busy || !p.ready || out > 0 || importing || (image && !applied) || !!mapFail} onClick={askCreate}>
       {base ? '创建新世界' : step2 ? (stepHow ? '开始演绎' : outlineHow ? '建好，先写大纲' : found ? `建好，停在第 ${found.year} 年` : '开始推演') : '创建世界'}
     </button>
   );
   /** 第 1 步底部:「保存地图」「打造文明 ›」 */
   const mapBtns = (
     <div className="st-foot-2">
-      <button className="nw-create alt" data-act="save-map" disabled={p.busy || !p.ready || out > 0} onClick={() => p.onSaveMap()}>
+      <button className="nw-create alt" data-act="save-map" disabled={p.busy || !p.ready || out > 0 || !!mapFail} onClick={() => p.onSaveMap()}>
         保存地图
       </button>
-      <button className="nw-create" data-act="to-civ" disabled={p.busy || !p.ready || out > 0} onClick={toCiv}>
+      <button className="nw-create" data-act="to-civ" disabled={p.busy || !p.ready || out > 0 || !!mapFail} onClick={toCiv}>
         {p.phone ? '地图做好了，下一步' : '打造文明 ›'}
       </button>
     </div>
@@ -1827,7 +1847,7 @@ export function Studio(p: StudioProps) {
   ) : spShown ? (
     <SimPickHost phone={p.phone} onBack={() => setSimPage(false)} onCollapse={p.phone ? undefined : () => setCollapsed(true)} />
   ) : mpShown ? (
-    <MapPickHost phone={p.phone} onBack={() => setMapPage(false)} onChange={() => p.onMaps?.()} onCollapse={p.phone ? undefined : () => setCollapsed(true)} />
+    <MapPickHost phone={p.phone} worldId={mapFail?.worldId ?? mapNow?.id} onBack={() => setMapPage(false)} onChange={() => p.onMaps?.()} onCollapse={p.phone ? undefined : () => setCollapsed(true)} />
   ) : (
     ogShown && (
       <OriginsPage
@@ -2403,6 +2423,21 @@ export function Studio(p: StudioProps) {
             else p.onParams(q);
           }}
         />
+      )}
+      {mapFail && !mapFail.quiet && !out && (
+        <div className={`mf-wrap${p.phone ? ' ph' : ''}`} style={p.phone ? undefined : { left: box.x + box.w / 2, top: box.y + box.h / 2 }}>
+          <Suspense fallback={null}>
+            <MapFailCard
+              f={mapFail}
+              onPick={openMapPage}
+              onDrop={() =>
+                void import('../plugins/mapWorld').then(async (m) => {
+                  if (await m.chooseMaps(mapFail.worldId, m.chosenMaps(mapFail.worldId).filter((c) => c.id !== mapFail.plugin))) p.onMaps?.();
+                })
+              }
+            />
+          </Suspense>
+        </div>
       )}
       {viewSaved && !out && (
         <div className="st-cap st-tip st-def-tip" style={!p.phone ? { left: box.x + box.w / 2 } : undefined} data-act="default-view-tip">

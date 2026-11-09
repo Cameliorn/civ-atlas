@@ -86,7 +86,10 @@ import type { PlanetValue, WorldPlugin } from './gen/worldFormat';
 import type { SimPluginFile } from './plugin/pluginWorld';
 import type { DevTryResult } from './plugin/devTry';
 import type { SimPluginsOn } from './simPluginRun';
-import { MapPluginError, timedMapPlugins, type MapPlugin, type MapStage } from './gen/mapHooks';
+import { MapPluginError, timedMapPlugins, type MapFailKind, type MapPlugin, type MapSpent, type MapStage } from './gen/mapHooks';
+
+/** 地图插件长不下去的是哪一种:插件出的错(见 MapFailKind)、这台没有世界记的那一版(missing)、装不上(load) */
+export type MapFailedKind = MapFailKind | 'missing' | 'load';
 import { mapPluginKey } from './gen/worldFormat';
 import type { MapPluginFile } from './plugin/pluginWorld';
 import { olderTerrainOf } from './gen/readers/older';
@@ -345,7 +348,7 @@ export type WorkerResponse =
   /**
    * 这件活要长地图,地图插件长不下去(这一件的回音,地图上还是原来那份):plugin = 哪个插件,stage = 哪一口(装的时候、这台没有那一版 = null),why = 为什么
    */
-  | { type: 'mapFailed'; id: number; plugin: string; stage: MapStage | null; why: string };
+  | { type: 'mapFailed'; id: number; plugin: string; stage: MapStage | null; why: string; kind?: MapFailedKind; spent?: MapSpent[] };
 
 /** 上一个生成的世界(含回放快照),回放时直接用 */
 let last: { key: string; world: World } | null = null;
@@ -484,9 +487,11 @@ const mapKeys = (m: { mapPlugins?: readonly MapPluginFile[] }): string[] => m.ma
 let mapRunFailed = false;
 
 /** 装好请求带的、带了字节的地图插件(装过的不再装);装不上的要长地图时才报。没带字节的不再用记着的那一份 */
-async function loadMapsFor(m: { mapPlugins?: readonly MapPluginFile[] }): Promise<void> {
+async function loadMapsFor(m: { id: number; type: string; mapPlugins?: readonly MapPluginFile[] }): Promise<void> {
   if (!m.mapPlugins?.length) return;
   if (!m.mapPlugins.some((f) => f.bytes)) return void mapRun?.loadMaps(m.mapPlugins, mapRun.quickjsMapBox);
+  // 头一回用到地图插件:先下装插件的代码(和推演插件同一份),进度上说一声
+  if (!mapRun && m.type === 'generate') post({ type: 'progress', id: m.id, stage: '下载插件程序……', pct: 0 });
   try {
     mapRun ??= await import('./mapPluginRun');
     mapRunFailed = false;
@@ -555,12 +560,12 @@ function planetOffer(world: World, m: CivInput): PlanetValue | null {
   return tempo !== undefined || names ? { ...(tempo !== undefined ? { tempo } : {}), ...(names ? { names } : {}) } : null;
 }
 
-/** 地图插件长不下去的错:哪个插件、哪一口、为什么;别的错 = null */
-function mapFailure(e: unknown): { plugin: string; stage: MapStage | null; why: string; dead: boolean } | null {
-  if (e instanceof MapPluginError) return { plugin: e.plugin, stage: e.stage, why: e.why, dead: true };
-  if (e instanceof MapsMissing) return { plugin: e.plugin, stage: null, why: e.why, dead: false };
+/** 地图插件长不下去的错:哪个插件、哪一口、为什么、哪一种;别的错 = null */
+function mapFailure(e: unknown): { plugin: string; stage: MapStage | null; why: string; kind: MapFailedKind; spent?: MapSpent[]; dead: boolean } | null {
+  if (e instanceof MapPluginError) return { plugin: e.plugin, stage: e.stage, why: e.why, kind: e.kind, ...(e.spent ? { spent: [...e.spent] } : {}), dead: true };
+  if (e instanceof MapsMissing) return { plugin: e.plugin, stage: null, why: e.why, kind: 'missing', dead: false };
   const x = e as { name?: unknown; plugin?: unknown; why?: unknown } | null;
-  if (x && x.name === 'MapPluginLoadError' && typeof x.plugin === 'string') return { plugin: x.plugin, stage: null, why: String(x.why ?? ''), dead: false };
+  if (x && x.name === 'MapPluginLoadError' && typeof x.plugin === 'string') return { plugin: x.plugin, stage: null, why: String(x.why ?? ''), kind: 'load', dead: false };
   return null;
 }
 
@@ -1316,7 +1321,7 @@ async function handle(m: Queued): Promise<void> {
     const f = mapFailure(e);
     if (!f) throw e;
     if (f.dead) mapRun?.forgetMap(f.plugin);
-    post({ type: 'mapFailed', id: m.id, plugin: f.plugin, stage: f.stage, why: f.why });
+    post({ type: 'mapFailed', id: m.id, plugin: f.plugin, stage: f.stage, why: f.why, kind: f.kind, ...(f.spent ? { spent: f.spent } : {}) });
   }
 }
 
