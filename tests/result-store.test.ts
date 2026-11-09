@@ -127,6 +127,20 @@ describe('原件存进浏览器(resultStore)', () => {
     expect(mem.records.size).toBe(0);
   });
 
+  it('交来时说不算这个世界的(用了推演插件、本机对不上时不带插件推的):不存,也不留着等存档变了再存', async () => {
+    const id = saveStore.newWorldId();
+    openWorld(id, { ...EMPTY_EDITS, names: { 'region:c1': '甲' } });
+    expect(saveStore.loadWorld(id)).not.toBeNull();
+    const s = await snapshotOf(getEdits());
+    let usable = false;
+    expect(await offerSnapshot(s, (w) => w === id && usable)).toBe(false);
+    usable = true;
+    expect(await keepPending()).toBe(false);
+    expect(mem.records.size).toBe(0);
+    expect(await offerSnapshot(s, (w) => w === id && usable)).toBe(true);
+    expect(mem.records.size).toBe(1);
+  });
+
   it('不同版本的各留各的,不淘汰;复制跟着复制;删掉的世界、退出登录时删掉', async () => {
     const id = saveStore.newWorldId();
     openWorld(id);

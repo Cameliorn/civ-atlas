@@ -71,6 +71,8 @@ export function _setResultBackend(b: ResultBackend | null | undefined) {
 
 /** worker 交回来的最新一份原件(还没对上存档的先放着) */
 let pending: Snapshot | null = null;
+/** 这份原件能不能算当前世界的(交来时说的;不说 = 能) */
+let pendingOk: ((id: string) => boolean) | undefined;
 /** 写入一个接一个做(同一份不重复写) */
 let chain: Promise<unknown> = Promise.resolve();
 const queue = <T>(f: () => Promise<T>): Promise<T> => {
@@ -80,8 +82,9 @@ const queue = <T>(f: () => Promise<T>): Promise<T> => {
 };
 
 /** worker 交回来一份原件:对得上当前世界存着的存档就存下来 */
-export function offerSnapshot(s: Snapshot): Promise<boolean> {
+export function offerSnapshot(s: Snapshot, ok?: (id: string) => boolean): Promise<boolean> {
   pending = s;
+  pendingOk = ok;
   return keepPending();
 }
 
@@ -89,9 +92,14 @@ export function offerSnapshot(s: Snapshot): Promise<boolean> {
 export function keepPending(): Promise<boolean> {
   return queue(async () => {
     const s = pending;
+    const ok = pendingOk;
     const b = be();
     const c = currentWorld();
     if (!s || !b || !c || c.kind !== 'created' || c.unsaved || c.gone || s.generator !== GENERATOR_VERSION) return false;
+    if (ok && !ok(c.id)) {
+      if (pending === s) pending = null;
+      return false;
+    }
     const w = loadWorld(c.id);
     if (!w || w.draft || w.save.generator !== s.generator) return false;
     try {
