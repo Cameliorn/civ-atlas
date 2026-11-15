@@ -365,6 +365,8 @@ const PERM_ICON: Record<PermissionKey, IconName | keyof typeof MORE_ICONS> = {
   view: 'pin',
   viewSteer: 'map',
   layer: 'route',
+  fileSave: 'download',
+  fileOpen: 'file',
   storeWorld: 'box',
   sim: 'book',
   simSteer: 'history',
