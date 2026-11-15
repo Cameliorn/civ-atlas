@@ -431,7 +431,7 @@ async function apiChecks(ev: Ev) {
     JSON.stringify([o.file, r.files]),
   );
   check(o.panel === 'ok' && r.sink.panels.includes(3), '面板交给画的那一边', `${o.panel} ${JSON.stringify(r.sink.panels)}`);
-  check(eq(o.layers, ['ok', 'ok', 'ok', 'ok', 'limit', 'ok', 'ok']), '图层:四个以内交给画的那一边,第五个回 limit;标注、拿掉', JSON.stringify(o.layers));
+  check(eq(o.layers, ['ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'ok', 'limit', 'ok', 'ok']), '图层:八个以内交给画的那一边,第九个回 limit;标注、拿掉', JSON.stringify(o.layers));
   check(r.sink.layers.some(([k, v]) => k === 'b' && v === null) && r.sink.layers.some(([k, v]) => k === 'route' && v === 'marks'), '图层交给画的那一边、拿掉的也说', JSON.stringify(r.sink.layers).slice(0, 200));
   check(
     eq(o.bad, {
